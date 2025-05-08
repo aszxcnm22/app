@@ -83,7 +83,6 @@ inputWeight_OP = pd.read_csv('./Data/OP/inputWeightInference.csv', header=None).
 outputWeight_OP = pd.read_csv('./Data/OP/outputWeightInference.csv', header=None).values
 bias_OP = pd.read_csv('./Data/OP/biasInference.csv', header=None).values
 
-
 @app.post("/predict_OP/")
 async def predict_OP(data: dict):
     try:
@@ -130,13 +129,13 @@ def image_to_base64(image_path: str):
 async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
     try:
         contents = await file.read()
-
         img = Image.open(BytesIO(contents))
 
         if img.mode == 'RGBA':
             img = img.convert('RGB')
 
-        img.save("temp_uploaded_image.jpg")  
+        img.save("temp_uploaded_image.jpg")
+
         yolo_model = YOLO('./Model/segRSNA.pt')
         results = yolo_model("temp_uploaded_image.jpg")
 
@@ -144,11 +143,27 @@ async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         if results[0].masks is not None and len(results[0].boxes) > 0:
+            # ดึงกล่องและชื่อคลาส
             boxes = results[0].boxes.xyxy.cpu().numpy()
+            scores = results[0].boxes.conf.cpu().numpy()
+            class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+            names = results[0].names
+
+            # วาดกล่องและ label
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, box)
+                class_name = names[class_ids[i]] if names and class_ids[i] < len(names) else str(class_ids[i])
+                label = f"{class_name}: {scores[i]*100:.2f}%"
+
+                cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(image, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+            # ตัดเฉพาะวัตถุแรกเพื่อส่งเข้า VGG19
             x1, y1, x2, y2 = map(int, boxes[0])
             cropped = image[y1:y2, x1:x2]
-
             cropped_pil = Image.fromarray(cropped)
+
             transform = transforms.Compose([
                 transforms.Resize((64, 64)),
                 transforms.ToTensor(),
@@ -162,6 +177,7 @@ async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
                 features = features.view(features.size(0), -1).cpu().numpy().flatten()
 
             features_df = pd.DataFrame(features.reshape(1, -1))
+
         else:
             return templates.TemplateResponse("NEW.html", {
                 "request": request,
@@ -169,7 +185,8 @@ async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
                 "image_path": f"data:image/jpeg;base64,{base64.b64encode(contents).decode()}"
             })
 
-        input_weight = pd.read_csv('.Data/RSNA/RSNA_Augment_96/input_weight.csv', header=None).values
+        # ELM Inference
+        input_weight = pd.read_csv('./Data/RSNA/RSNA_Augment_96/input_weight.csv', header=None).values
         output_weight = pd.read_csv('./Data/RSNA/RSNA_Augment_96/output_weight.csv', header=None).values
 
         features_array = features_df.values
@@ -179,13 +196,19 @@ async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
         pred_class = np.argmax(output, axis=1)[0]
         confidence = np.max(output[0]) / np.sum(output[0])
 
+        # แปลงภาพที่วาดแล้วกลับเป็น base64
+        pil_img = Image.fromarray(image)
+        buffer = BytesIO()
+        pil_img.save(buffer, format="JPEG")
+        seg_image_base64 = base64.b64encode(buffer.getvalue()).decode()
+
         return templates.TemplateResponse("NEW.html", {
             "request": request,
             "prediction": {
                 "class": To_Class(pred_class),
                 "confidence": round(confidence * 100, 2)
             },
-            "image_path": f"data:image/jpeg;base64,{base64.b64encode(contents).decode()}"
+            "image_path": f"data:image/jpeg;base64,{seg_image_base64}"
         })
 
     except Exception as e:
@@ -193,6 +216,8 @@ async def predict_rsna_html(request: Request, file: UploadFile = File(...)):
             "request": request,
             "error": str(e)
         })
+
+
     
 @app.get("/js/{file_path:path}")
 async def serve_js(file_path: str):
